@@ -1,0 +1,104 @@
+<!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
+<idea-plugin>
+        <id>com.crudtool</id>
+
+    <name>crud-tool</name>
+
+    <vendor email="liuyanoutsee@outlook.com"
+            url="https://github.com/ukpkmkk512">
+        donkey
+    </vendor>
+
+    <description><![CDATA[
+        <b>crud-tool is a Free Spring Cloud &amp; MyBatis Mapper Navigation Assistant.</b><br>
+        Supports url full path copying to the clipboard for Controller interfaces.<br>
+        Supports Ctrl+Alt+Click bidirectional navigation between Mapper interface methods and XML statements.<br>
+        Supports Ctrl+\ route search.<br>
+        Supports Ctrl+Alt+F formatting SQL inside MyBatis mapper XML statements (works with dynamic tags).<br>
+        Supports generating Java entity classes of database tables to Desktop from the Database tool window context menu,
+        with per-project configurable Lombok annotations (Settings → Tools → CrudTool).<br>
+    ]]></description>
+
+    <change-notes><![CDATA[
+        Support IntelliJ IDEA 2026.x<br>
+        Add Ctrl+Alt+F to format SQL inside MyBatis mapper XML statements<br>
+        Add "Entity Generator" group to the Database tool window table context menu to generate entity classes to Desktop<br>
+        Add per-project entity generation settings (Lombok annotations) under Settings → Tools → CrudTool<br>
+        Fix RejectedExecutionException caused by nested MethodReferencesSearch in reference resolve<br>
+        Fix duplicated slashes in copied/searched controller routes when class-level @RequestMapping has a trailing slash<br>
+        Fix PluginException caused by missing displayName attribute on the projectConfigurable descriptor
+    ]]></change-notes>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.java</depends>
+    <!-- Database 工具支持（仅 Ultimate 等带 Database 插件的 IDE 可用，缺失时不影响其余功能） -->
+    <depends optional="true" config-file="database-support.xml">com.intellij.database</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+
+        <!-- 实体类生成设置（按项目隔离） -->
+        <projectService serviceImplementation="com.crudtool.settings.EntityGeneratorSettings"/>
+
+        <!-- Settings → Tools → CrudTool -->
+        <projectConfigurable id="com.crudtool.settings.EntityGeneratorConfigurable"
+                             instance="com.crudtool.settings.EntityGeneratorConfigurable"
+                             displayName="CrudTool"
+                             parentId="tools"
+                             nonDefaultProject="true"/>
+
+        <codeInsight.lineMarkerProvider language="JAVA"
+                                        implementationClass="com.crudtool.provider.CopyControllerUrlLineMarkerProvider"/>
+
+        <!-- MyBatis Mapper 接口方法 跳转到 mapper XML 语句 -->
+        <codeInsight.lineMarkerProvider language="JAVA"
+                                        implementationClass="com.crudtool.provider.JavaToMapperLineMarkerProvider"/>
+
+        <!-- mapper XML 语句 跳转到 MyBatis Mapper 接口方法 -->
+        <codeInsight.lineMarkerProvider language="XML"
+                                        implementationClass="com.crudtool.provider.MapperToJavaLineMarkerProvider"/>
+
+        <!-- XML resultMap 属性值 → <resultMap> 标签定义处 -->
+        <psi.referenceContributor language="XML"
+                                  implementation="com.crudtool.provider.MapperReferenceContributor"/>
+
+        <!-- Ctrl+Click 跳转：Java 方法名 / XML id → Java 调用处（仅在用户导航时执行搜索） -->
+        <gotoDeclarationHandler implementation="com.crudtool.provider.MapperCallSiteGotoHandler"/>
+
+        <notificationGroup id="crud-tool"
+                           displayType="BALLOON"
+                           key="notification.group.name"/>
+
+        <!-- 编辑器级 Ctrl+Alt+Click 拦截：Mapper 接口方法 ↔ XML 语句 双向跳转
+             因 control alt button1 与 IDEA 内置 GotoImplementation 冲突，
+             改为在编辑器鼠标事件层拦截，命中 Mapper 元素时消费事件，否则放行给内置动作 -->
+        <editorFactoryListener implementation="com.crudtool.listener.MapperJumpEditorListener"/>
+
+    </extensions>
+
+    <actions>
+        <!-- Ctrl+\：弹出路由搜索窗口，输入接口路由跳转到对应 Controller 方法 -->
+        <action id="com.crudtool.action.SearchByRouteAction"
+                class="com.crudtool.action.SearchByRouteAction"
+                text="Search Controller by Route"
+                description="Pop up a search window to find and jump to a controller interface by route (Ctrl+\)">
+            <keyboard-shortcut first-keystroke="control BACK_SLASH" keymap="$default"/>
+        </action>
+
+        <!-- 保留 MapperXmlJumpAction 作为菜单项（不再注册 mouse-shortcut，由 EditorFactoryListener 拦截 Ctrl+Alt+Click） -->
+        <action id="com.crudtool.action.MapperXmlJumpAction"
+                class="com.crudtool.action.MapperXmlJumpAction"
+                text="Jump to Mapper XML/Java"
+                description="Jump between Mapper interface method and XML statement (Ctrl+Alt+Click)">
+        </action>
+
+        <!-- Ctrl+Alt+F：格式化 MyBatis mapper XML 语句标签内的 SQL -->
+        <action id="com.crudtool.action.FormatMapperSqlAction"
+                class="com.crudtool.action.FormatMapperSqlAction"
+                text="Format Mapper SQL"
+                description="Format SQL inside the current MyBatis statement tag (Ctrl+Alt+F)">
+            <keyboard-shortcut first-keystroke="control alt F" keymap="$default"/>
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+    </actions>
+
+</idea-plugin>

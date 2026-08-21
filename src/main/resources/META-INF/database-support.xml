@@ -1,0 +1,14 @@
+<idea-plugin>
+    <!-- 依赖 com.intellij.database 时才加载：Database 工具窗口右键表生成实体类 -->
+    <actions>
+        <group id="com.crudtool.database.EntityGeneratorGroup"
+               text="Entity Generator"
+               popup="true">
+            <add-to-group group-id="DatabaseViewPopupMenu" anchor="last"/>
+            <action id="com.crudtool.action.GenerateEntityAction"
+                    class="com.crudtool.action.GenerateEntityAction"
+                    text="Generate Entity to Desktop"
+                    description="Generate Java entity class of the selected table(s) to Desktop"/>
+        </group>
+    </actions>
+</idea-plugin>
