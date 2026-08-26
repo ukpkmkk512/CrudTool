@@ -8,30 +8,39 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.CommonDataKeys;
+import com.intellij.openapi.application.ReadAction;
 import com.intellij.openapi.command.WriteCommandAction;
+import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.Editor;
+import com.intellij.openapi.editor.SelectionModel;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.util.TextRange;
 import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiFile;
 import com.intellij.psi.xml.XmlFile;
 import com.intellij.psi.xml.XmlTag;
-import com.intellij.psi.xml.XmlText;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 
 /**
  * 格式化 MyBatis mapper XML 中语句标签内的 SQL（Ctrl+Alt+F）。
  *
- * 针对 IJPL-18250 场景：当 &lt;select&gt; 等语句中混入 &lt;if&gt; 等动态标签时，
- * IDE 内置格式化无法正确格式化 SQL。本动作遍历语句标签内所有纯文本 SQL 段，
- * 用 sql-formatter 逐段格式化（保留动态标签结构与 #{} / ${} 占位符）。
+ * 实现方式（用户建议）：提取整个语句标签的 inner content，把 MyBatis 动态标签
+ * 替换为 SQL 注释占位符后得到完整 SQL，用 IDEA 内置 CodeStyleManager 格式化，
+ * 再还原标签，并通过字符级校验确保没有丢失代码。
+ *
+ * 格式化范围：有选区时格式化选区覆盖的所有语句标签；
+ * 无选区时只格式化光标所在的单个语句标签。
  */
 public class FormatMapperSqlAction extends AnAction {
 
-    /** XML 单级缩进（4 空格） */
-    private static final String INDENT_UNIT = "    ";
+    /** 一次文档替换 */
+    private record Replacement(int start, int end, String newText) {
+    }
 
     @Override
     public @NotNull ActionUpdateThread getActionUpdateThread() {
@@ -40,64 +49,144 @@ public class FormatMapperSqlAction extends AnAction {
 
     @Override
     public void update(@NotNull AnActionEvent e) {
-        e.getPresentation().setEnabledAndVisible(findEnclosingStatement(e) != null);
+        boolean enabled = ReadAction.compute(() -> {
+            Editor editor = e.getData(CommonDataKeys.EDITOR);
+            PsiFile psiFile = e.getData(CommonDataKeys.PSI_FILE);
+            return editor != null && psiFile instanceof XmlFile
+                    && MyBatisMapperUtils.getMapperRootTag((XmlFile) psiFile) != null;
+        });
+        e.getPresentation().setEnabledAndVisible(enabled);
     }
 
     @Override
     public void actionPerformed(@NotNull AnActionEvent e) {
         Project project = e.getProject();
-        XmlTag statementTag = findEnclosingStatement(e);
-        if (project == null || statementTag == null) {
+        Editor editor = e.getData(CommonDataKeys.EDITOR);
+        PsiFile psiFile = e.getData(CommonDataKeys.PSI_FILE);
+        if (project == null || editor == null || !(psiFile instanceof XmlFile xmlFile)) {
             return;
         }
 
-        // 收集语句标签内所有可格式化的文本节点（含嵌套动态标签内的文本）
-        List<XmlText> textNodes = new ArrayList<>();
-        collectSqlTexts(statementTag, textNodes);
-        if (textNodes.isEmpty()) {
-            notify(project, "No SQL fragment to format", NotificationType.INFORMATION);
+        List<Replacement> replacements = ReadAction.compute(() ->
+                collectReplacements(xmlFile, editor));
+
+        if (replacements.isEmpty()) {
+            notify(project, "No SQL statement to format", NotificationType.INFORMATION);
             return;
         }
 
+        // 从后往前替换，避免偏移量变化
+        replacements.sort(Comparator.comparingInt(Replacement::start).reversed());
+
+        Document document = editor.getDocument();
         WriteCommandAction.runWriteCommandAction(project, "Format Mapper SQL", null, () -> {
-            for (XmlText text : textNodes) {
-                if (!text.isValid()) {
-                    continue;
-                }
-                int tagDepth = getTagDepth(text.getParentTag());
-                String formatted = MybatisSqlFormatUtils.format(
-                        text.getValue(), INDENT_UNIT, tagDepth + 1);
-                if (formatted.equals(text.getValue())) {
-                    continue;
-                }
-                // 重建文本：换行 + 内容缩进 + 闭合标签前的父级缩进
-                String parentIndent = INDENT_UNIT.repeat(tagDepth);
-                text.setValue("\n" + formatted + "\n" + parentIndent);
+            for (Replacement rep : replacements) {
+                document.replaceString(rep.start(), rep.end(), rep.newText());
             }
         });
-        notify(project, "SQL formatted in <" + statementTag.getName() + ">",
-                NotificationType.INFORMATION);
+        notify(project, "Mapper SQL formatted", NotificationType.INFORMATION);
     }
 
     /**
-     * 从光标位置向上查找所属的 MyBatis 语句标签（select/insert/update/delete），
-     * 且文件必须是 mapper XML；不满足返回 null
+     * 收集需要格式化的语句标签，计算 inner content 的替换范围和新文本。
      */
-    private XmlTag findEnclosingStatement(@NotNull AnActionEvent e) {
-        Project project = e.getProject();
-        Editor editor = e.getData(CommonDataKeys.EDITOR);
-        PsiFile psiFile = e.getData(CommonDataKeys.PSI_FILE);
-        if (project == null || editor == null || !(psiFile instanceof XmlFile)) {
-            return null;
+    @NotNull
+    private List<Replacement> collectReplacements(@NotNull XmlFile xmlFile,
+                                                   @NotNull Editor editor) {
+        List<Replacement> result = new ArrayList<>();
+        Document document = editor.getDocument();
+
+        List<XmlTag> tags = findTargetTags(xmlFile, editor);
+        for (XmlTag tag : tags) {
+            if (!tag.isValid()) {
+                continue;
+            }
+            // 找到 inner content 的范围：开始标签的 '>' 之后 ~ 结束标签的 '<' 之前
+            TextRange tagRange = tag.getTextRange();
+            String tagFullText = document.getText(tagRange);
+
+            int openEnd = tagFullText.indexOf('>');
+            if (openEnd < 0) {
+                continue;
+            }
+            int closeStart = tagFullText.lastIndexOf("</");
+            if (closeStart < 0) {
+                continue;
+            }
+
+            int innerStart = tagRange.getStartOffset() + openEnd + 1;
+            int innerEnd = tagRange.getStartOffset() + closeStart;
+            String innerContent = document.getText(new TextRange(innerStart, innerEnd));
+
+            int baseIndent = lineIndent(document, tag.getTextOffset()) + 4;
+            String formatted = MybatisSqlFormatUtils.formatStatement(
+                    xmlFile.getProject(), innerContent, baseIndent);
+
+            if (formatted != null) {
+                // 闭合标签的缩进 = 语句标签自身的缩进
+                int closeIndent = lineIndent(document, tag.getTextOffset());
+                String newInner = formatted + "\n" + " ".repeat(closeIndent);
+                if (!newInner.equals(innerContent)) {
+                    result.add(new Replacement(innerStart, innerEnd, newInner));
+                }
+            }
         }
-        XmlFile xmlFile = (XmlFile) psiFile;
-        if (MyBatisMapperUtils.getMapperRootTag(xmlFile) == null) {
-            return null;
+        return result;
+    }
+
+    /**
+     * 找到需要格式化的语句标签：
+     * - 有选区时，选区覆盖的所有语句标签
+     * - 无选区时，光标所在的单个语句标签
+     */
+    @NotNull
+    private List<XmlTag> findTargetTags(@NotNull XmlFile xmlFile, @NotNull Editor editor) {
+        List<XmlTag> result = new ArrayList<>();
+        XmlTag root = MyBatisMapperUtils.getMapperRootTag(xmlFile);
+        if (root == null) {
+            return result;
         }
-        PsiElement element = psiFile.findElementAt(editor.getCaretModel().getOffset());
+
+        SelectionModel selection = editor.getSelectionModel();
+        if (selection.hasSelection()) {
+            int selStart = selection.getSelectionStart();
+            int selEnd = selection.getSelectionEnd();
+            collectStatementTags(root, result, tag -> {
+                TextRange r = tag.getTextRange();
+                return r.getEndOffset() > selStart && r.getStartOffset() < selEnd;
+            });
+        } else {
+            XmlTag enclosing = findEnclosingStatement(xmlFile,
+                    editor.getCaretModel().getOffset());
+            if (enclosing != null) {
+                result.add(enclosing);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 递归收集满足条件的语句标签
+     */
+    private void collectStatementTags(@NotNull XmlTag tag, @NotNull List<XmlTag> out,
+                                       @NotNull java.util.function.Predicate<XmlTag> filter) {
+        if (MyBatisMapperUtils.isStatementTag(tag) && filter.test(tag)) {
+            out.add(tag);
+        }
+        for (XmlTag sub : tag.getSubTags()) {
+            collectStatementTags(sub, out, filter);
+        }
+    }
+
+    /**
+     * 从偏移量向上查找所属的 MyBatis 语句标签
+     */
+    @Nullable
+    private XmlTag findEnclosingStatement(@NotNull XmlFile xmlFile, int offset) {
+        PsiElement element = xmlFile.findElementAt(offset);
         while (element != null) {
-            if (element instanceof XmlTag && MyBatisMapperUtils.isStatementTag((XmlTag) element)) {
-                return (XmlTag) element;
+            if (element instanceof XmlTag tag && MyBatisMapperUtils.isStatementTag(tag)) {
+                return tag;
             }
             element = element.getParent();
         }
@@ -105,31 +194,23 @@ public class FormatMapperSqlAction extends AnAction {
     }
 
     /**
-     * 递归收集标签内所有"看起来是 SQL"的文本节点
+     * 元素所在行的行首缩进宽度（tab 按 4 计）
      */
-    private void collectSqlTexts(@NotNull XmlTag tag, @NotNull List<XmlText> out) {
-        for (PsiElement child = tag.getFirstChild(); child != null; child = child.getNextSibling()) {
-            if (child instanceof XmlText) {
-                if (MybatisSqlFormatUtils.looksLikeSql(((XmlText) child).getValue())) {
-                    out.add((XmlText) child);
-                }
-            } else if (child instanceof XmlTag) {
-                collectSqlTexts((XmlTag) child, out);
+    private int lineIndent(@NotNull Document document, int offset) {
+        int lineStart = document.getLineStartOffset(document.getLineNumber(offset));
+        CharSequence chars = document.getCharsSequence();
+        int width = 0;
+        for (int i = lineStart; i < offset; i++) {
+            char c = chars.charAt(i);
+            if (c == ' ') {
+                width++;
+            } else if (c == '\t') {
+                width += 4;
+            } else {
+                break;
             }
         }
-    }
-
-    /**
-     * 计算标签嵌套深度（mapper 根标签为 0）
-     */
-    private int getTagDepth(@NotNull XmlTag tag) {
-        int depth = 0;
-        PsiElement parent = tag.getParent();
-        while (parent instanceof XmlTag) {
-            depth++;
-            parent = parent.getParent();
-        }
-        return depth;
+        return width;
     }
 
     private void notify(@NotNull Project project, @NotNull String content,

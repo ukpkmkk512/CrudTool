@@ -1,171 +1,234 @@
 package com.crudtool.utils;
 
-import com.github.vertical_blank.sqlformatter.SqlFormatter;
+import com.intellij.openapi.diagnostic.Logger;
+import com.intellij.openapi.project.Project;
+import com.intellij.psi.PsiFile;
+import com.intellij.psi.PsiFileFactory;
+import com.intellij.psi.codeStyle.CodeStyleManager;
+import com.intellij.sql.SqlFileType;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * MyBatis mapper XML 中 SQL 片段的格式化工具。
+ * MyBatis mapper XML 语句标签内 SQL 的格式化工具。
  *
- * 格式化流程：
- *   1. 将 #{...} / ${...} 占位符替换为安全 token（SQL 解析器不认识它们，直接格式化会报错）
- *   2. 解码 XML 实体（&amp;gt; 等），使 SQL 关键字可被正确识别
- *   3. 调用 vertical-blank sql-formatter 格式化（关键字大写、子句换行、缩进）
- *   4. 还原占位符，并按 XML 缩进规则重新缩进各行
- *
- * 注意：格式化器不理解 MyBatis 动态标签，调用方需先把文本节点与子标签分离，
- * 只对纯文本 SQL 段调用本工具。
+ * 核心思路（用户建议）：
+ *   1. 把 &lt;if&gt; 等 MyBatis 动态标签替换为 SQL 块注释占位符（剥离标签）
+ *   2. 把 #{} / ${} 占位符替换为合法 SQL 标识符
+ *   3. 得到一段完整、合法的 SQL，用 IDEA 内置 CodeStyleManager 格式化
+ *   4. 还原标签和占位符
+ *   5. 校验：剥离标签和空白后的字符序列前后必须一致，否则放弃格式化
  */
 public class MybatisSqlFormatUtils {
 
-    /** MyBatis 占位符：#{xxx} 或 ${xxx}（含 jdbcType、mode 等附加属性） */
-    private static final Pattern PLACEHOLDER = Pattern.compile("[#$]\\{[^}]*}");
+    private static final Logger LOG = Logger.getInstance(MybatisSqlFormatUtils.class);
 
-    /** 占位符 token 使用不会与 SQL 冲突的字符 */
-    private static final char TOKEN_PREFIX = '@';
+    /** MyBatis 参数占位符 #{} / ${} */
+    private static final Pattern PLACEHOLDER = Pattern.compile("[#$]\\{[^}]*\\}");
 
-    /** 视为 SQL 起始关键字的单词（用于判断文本段是否值得格式化） */
+    /** MyBatis 动态标签：<if ...>, </if>, <where>, <trim .../>, <choose> 等 */
+    private static final Pattern MYBATIS_TAG =
+            Pattern.compile("</?[a-zA-Z][a-zA-Z0-9]*(?:\\s[^>]*?)?/?>");
+
+    /** CDATA 区段 <![CDATA[ ... ]]> */
+    private static final Pattern CDATA_SECTION =
+            Pattern.compile("<!\\[CDATA\\[.*?]]>", Pattern.DOTALL);
+
     private static final String[] SQL_START_KEYWORDS = {
-            "select", "insert", "update", "delete", "with", "from", "where",
-            "set", "values", "and", "or", "on", "join", "order", "group",
-            "having", "limit", "offset", "union", "into"
+            "select", "insert", "update", "delete", "with"
     };
 
     private MybatisSqlFormatUtils() {
     }
 
     /**
-     * 格式化一段 MyBatis SQL 文本片段。
+     * 格式化一个 MyBatis 语句标签的完整 inner content。
      *
-     * @param sqlFragment 语句标签内的纯文本 SQL 段（不含动态子标签）
-     * @param indentUnit  XML 单级缩进字符串（通常为 4 空格）
-     * @param baseLevel   该文本段所在标签的嵌套层级（决定整体缩进基准）
-     * @return 格式化后的多行文本（行首含缩进，不含行尾换行）；若无实质内容则原样返回
+     * @param project       当前项目
+     * @param rawContent    标签内原始文本（含动态标签、空白、换行）
+     * @param baseIndent    SQL 基准缩进（空格数），通常是语句标签缩进 + 4
+     * @return 格式化后的文本；非 SQL、格式化失败或校验不通过时返回 null
      */
-    public static String format(String sqlFragment, String indentUnit, int baseLevel) {
-        if (sqlFragment == null) {
-            return sqlFragment;
-        }
-        String trimmed = sqlFragment.trim();
-        if (trimmed.isEmpty()) {
-            return sqlFragment;
+    public static String formatStatement(Project project, String rawContent, int baseIndent) {
+        if (rawContent == null || rawContent.isBlank()) {
+            return null;
         }
 
-        // 1. 占位符 → token
-        List<String> placeholders = new ArrayList<>();
-        String masked = maskPlaceholders(trimmed, placeholders);
+        // 1. 保留 CDATA 区段（里面可能有 < > & 等 XML 特殊字符，不参与 SQL 解析）
+        List<String> cdataBlocks = new ArrayList<>();
+        String working = preserveBlocks(rawContent, CDATA_SECTION, cdataBlocks, "MCDATA");
 
-        // 2. 解码 XML 实体
-        masked = decodeXmlEntities(masked);
+        // 2. 替换 #{} / ${} 为合法标识符
+        List<String> params = new ArrayList<>();
+        working = replacePattern(working, PLACEHOLDER, params, "MBP", "");
 
-        // 3. 格式化
+        // 3. 替换 MyBatis 动态标签为 SQL 块注释占位符
+        //    用块注释是因为 SQL 格式化器会保留注释，不会把它当语法元素移动
+        List<String> tags = new ArrayList<>();
+        working = replacePattern(working, MYBATIS_TAG, tags, "/*MTAG", "*/");
+
+        // 4. 检查是否确实包含 SQL（跳过前导块注释和空白）
+        String trimmed = working.trim();
+        while (trimmed.startsWith("/*")) {
+            int end = trimmed.indexOf("*/");
+            if (end < 0) {
+                break;
+            }
+            trimmed = trimmed.substring(end + 2).trim();
+        }
+        if (!startsWithSqlKeyword(trimmed)) {
+            return null;
+        }
+
+        // 5. 用 IDEA 内置 SQL 格式化引擎格式化完整 SQL（trim 去掉首尾空白，避免累积空行）
         String formatted;
         try {
-            formatted = SqlFormatter.format(masked);
-        } catch (RuntimeException e) {
-            // 解析失败时保守返回原文，避免破坏用户代码
-            return sqlFragment;
-        }
-        if (formatted == null || formatted.isBlank()) {
-            return sqlFragment;
+            PsiFile sqlFile = PsiFileFactory.getInstance(project)
+                    .createFileFromText("temp_mapper.sql", SqlFileType.INSTANCE, working.trim());
+            CodeStyleManager.getInstance(project).reformat(sqlFile);
+            formatted = sqlFile.getText();
+        } catch (Exception e) {
+            LOG.warn("SQL reformat failed", e);
+            return null;
         }
 
-        // 4. 还原占位符
-        formatted = restorePlaceholders(formatted, placeholders);
+        // 6. 校验：格式化前后，剥离标签/注释/占位符/空白后的字符序列必须一致
+        if (!verifyIntegrity(rawContent, formatted, cdataBlocks.size(), params.size())) {
+            LOG.info("SQL integrity check failed, skipping format. Original length="
+                    + rawContent.length() + ", formatted length=" + formatted.length());
+            return null;
+        }
 
-        // 5. 按 XML 层级重新缩进
-        return reindent(formatted, indentUnit, baseLevel);
+        // 7. 还原 #{} / ${}
+        for (int i = 0; i < params.size(); i++) {
+            formatted = formatted.replace("MBP" + i, params.get(i));
+        }
+
+        // 8. 还原 MyBatis 标签，并修正缩进
+        formatted = restoreTags(formatted, tags, baseIndent);
+
+        // 9. 还原 CDATA
+        for (int i = 0; i < cdataBlocks.size(); i++) {
+            formatted = formatted.replace("MCDATA" + i, cdataBlocks.get(i));
+        }
+
+        // 10. 统一按基准缩进重新缩进每一行
+        formatted = reindent(formatted, baseIndent);
+
+        return formatted;
     }
 
     /**
-     * 判断文本段是否包含 SQL 内容（首个单词是 SQL 关键字），
-     * 用于跳过纯空白或无意义文本，避免不必要的改动。
+     * 用正则替换匹配项为占位符，记录原始内容
      */
-    public static boolean looksLikeSql(String text) {
-        if (text == null) {
-            return false;
-        }
-        String t = text.trim();
-        if (t.isEmpty()) {
-            return false;
-        }
-        // 提取首个单词（占位符开头的段也视为 SQL，如 "#{ids} = ..."）
-        Matcher m = Pattern.compile("[#$]\\{|[A-Za-z]+").matcher(t);
-        if (!m.find()) {
-            return false;
-        }
-        String first = m.group();
-        if (first.startsWith("#") || first.startsWith("$")) {
-            return true;
-        }
-        String lower = first.toLowerCase();
-        for (String kw : SQL_START_KEYWORDS) {
-            if (kw.equals(lower)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * 将 #{...}/${...} 替换为 @0、@1... 形式的 token，原值收集到 placeholders
-     */
-    private static String maskPlaceholders(String sql, List<String> placeholders) {
-        Matcher m = PLACEHOLDER.matcher(sql);
-        StringBuilder sb = new StringBuilder();
+    private static String replacePattern(String input, Pattern pattern,
+                                         List<String> originals,
+                                         String prefix, String suffix) {
+        Matcher m = pattern.matcher(input);
+        StringBuffer sb = new StringBuffer();
         while (m.find()) {
-            placeholders.add(m.group());
-            m.appendReplacement(sb, Matcher.quoteReplacement(TOKEN_PREFIX + String.valueOf(placeholders.size() - 1)));
+            originals.add(m.group());
+            m.appendReplacement(sb, Matcher.quoteReplacement(prefix + (originals.size() - 1) + suffix));
         }
         m.appendTail(sb);
         return sb.toString();
     }
 
+    private static String preserveBlocks(String input, Pattern pattern,
+                                         List<String> blocks, String prefix) {
+        return replacePattern(input, pattern, blocks, prefix, "");
+    }
+
     /**
-     * 将 token 还原为原始占位符
+     * 还原 MyBatis 标签。
+     * 格式化后每个 /*MTAGn* / 通常独占一行，将其替换为原始标签（暂不加缩进，
+     * 缩进由 {@link #reindent} 统一添加）。
      */
-    private static String restorePlaceholders(String formatted, List<String> placeholders) {
-        String result = formatted;
-        for (int i = placeholders.size() - 1; i >= 0; i--) {
-            // 从大到小替换，避免 @1 误匹配 @10 的前缀
-            result = result.replace(TOKEN_PREFIX + String.valueOf(i), placeholders.get(i));
+    private static String restoreTags(String formatted, List<String> tags, int baseIndent) {
+        for (int i = 0; i < tags.size(); i++) {
+            String marker = "/*MTAG" + i + "*/";
+            // 尝试匹配独占一行的标记（含行首空白和换行）
+            Pattern linePattern = Pattern.compile(
+                    "(?m)^([ \\t]*)" + Pattern.quote(marker) + "[ \\t]*\\r?\\n?");
+            Matcher m = linePattern.matcher(formatted);
+            if (m.find()) {
+                formatted = m.replaceFirst(Matcher.quoteReplacement(tags.get(i) + "\n"));
+            } else {
+                formatted = formatted.replace(marker, tags.get(i));
+            }
         }
-        return result;
+        return formatted;
     }
 
     /**
-     * 解码 mapper XML 文本中常见的 XML 实体
+     * 按基准缩进重新缩进所有行。
+     * 在每行现有缩进前追加 baseIndent，保留 SQL 格式化器产生的相对缩进。
+     * 第一行前加换行，末尾去除尾部空行（由调用方拼接闭合标签缩进）。
      */
-    private static String decodeXmlEntities(String s) {
-        return s.replace("&lt;", "<")
-                .replace("&gt;", ">")
-                .replace("&amp;", "&")
-                .replace("&quot;", "\"")
-                .replace("&apos;", "'");
-    }
-
-    /**
-     * 将格式化结果按 XML 层级缩进：首行不加缩进（由调用方拼接），后续行统一缩进
-     */
-    private static String reindent(String formatted, String indentUnit, int baseLevel) {
-        String baseIndent = indentUnit.repeat(Math.max(baseLevel, 0));
-        String[] lines = formatted.split("\\R");
+    private static String reindent(String text, int baseIndent) {
+        String indent = " ".repeat(baseIndent);
+        // 去除尾部空白行，避免每次格式化累积空行
+        String stripped = text.replaceAll("[ \\t]*\\R+$", "");
+        String[] lines = stripped.split("\\R", -1);
         StringBuilder sb = new StringBuilder();
-        boolean first = true;
-        for (String line : lines) {
-            String content = line.stripTrailing();
-            if (content.isEmpty()) {
-                continue;
+        for (int i = 0; i < lines.length; i++) {
+            if (i == 0) {
+                sb.append('\n').append(indent);
+            } else if (lines[i].isBlank()) {
+                // 空行不加缩进
+            } else {
+                sb.append(indent);
             }
-            if (!first) {
-                sb.append('\n').append(baseIndent);
+            sb.append(lines[i]);
+            if (i < lines.length - 1) {
+                sb.append('\n');
             }
-            sb.append(content.stripLeading());
-            first = false;
         }
         return sb.toString();
+    }
+
+    /**
+     * 校验格式化前后内容完整性。
+     *
+     * 原始文本含 MyBatis 标签和 #{}，格式化后文本含 /*MTAGn* / 注释和 MBPn 标识符，
+     * 两边的表现形式不同，需要分别规范化后再比较。
+     */
+    private static boolean verifyIntegrity(String original, String formatted,
+                                           int cdataCount, int paramCount) {
+        // 原始侧：去 CDATA 区段（含内容，已单独保留）、去 MyBatis 标签、
+        //         #{} / ${} 统一为 ?、去空白、转小写
+        String normOrig = original;
+        normOrig = CDATA_SECTION.matcher(normOrig).replaceAll(" ");
+        normOrig = MYBATIS_TAG.matcher(normOrig).replaceAll(" ");
+        normOrig = PLACEHOLDER.matcher(normOrig).replaceAll("?");
+        normOrig = normOrig.replaceAll("\\s+", "").toLowerCase(Locale.ROOT);
+
+        // 格式化侧：去 /*MTAGn*/ 注释、去 MCDATAn 占位符、
+        //           MBPn 统一为 ?、去空白、转小写
+        String normFmt = formatted;
+        normFmt = normFmt.replaceAll("(?i)/\\*MTAG\\d+\\*/", " ");
+        for (int i = 0; i < cdataCount; i++) {
+            normFmt = normFmt.replace("MCDATA" + i, " ");
+        }
+        for (int i = 0; i < paramCount; i++) {
+            normFmt = normFmt.replace("MBP" + i, "?");
+        }
+        normFmt = normFmt.replaceAll("\\s+", "").toLowerCase(Locale.ROOT);
+
+        return normOrig.equals(normFmt);
+    }
+
+    private static boolean startsWithSqlKeyword(String text) {
+        String lower = text.toLowerCase(Locale.ROOT);
+        for (String kw : SQL_START_KEYWORDS) {
+            if (lower.startsWith(kw)) {
+                return true;
+            }
+        }
+        return false;
     }
 }

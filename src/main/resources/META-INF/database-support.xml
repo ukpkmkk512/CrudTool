@@ -1,6 +1,7 @@
 <idea-plugin>
-    <!-- 依赖 com.intellij.database 时才加载：Database 工具窗口右键表生成实体类 -->
+    <!-- 依赖 com.intellij.database 时才加载：需要 SQL 格式化引擎 / Database 工具窗口 API -->
     <actions>
+        <!-- Database 工具窗口右键表生成实体类 -->
         <group id="com.crudtool.database.EntityGeneratorGroup"
                text="Entity Generator"
                popup="true">
@@ -10,5 +11,14 @@
                     text="Generate Entity to Desktop"
                     description="Generate Java entity class of the selected table(s) to Desktop"/>
         </group>
+
+        <!-- Ctrl+Alt+F：格式化 MyBatis mapper XML 语句标签内的 SQL -->
+        <action id="com.crudtool.action.FormatMapperSqlAction"
+                class="com.crudtool.action.FormatMapperSqlAction"
+                text="Format Mapper SQL"
+                description="Format SQL inside the current MyBatis statement tag (Ctrl+Alt+F)">
+            <keyboard-shortcut first-keystroke="control alt F" keymap="$default"/>
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
     </actions>
 </idea-plugin>

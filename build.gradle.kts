@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.crudtool"
-version = "0.23"
+version = "0.31"
 
 repositories {
     mavenCentral()
@@ -16,8 +16,6 @@ repositories {
 
 dependencies {
     implementation("org.yaml:snakeyaml:2.4")
-    // MyBatis XML 中 SQL 格式化（vertical-blank/sql-formatter，JS sql-formatter 的 Java 移植）
-    implementation("com.github.vertical-blank:sql-formatter:2.0.4")
 
     intellijPlatform {
         // 使用本地 IDE 作为 SDK，避免从 JetBrains 仓库下载（本机网络无法访问其 CDN）
@@ -31,9 +29,13 @@ dependencies {
         include("**/*.jar")
     })
 
-    // Database 插件（com.intellij.database）的模型 API，仅编译期使用，运行时由 IDE 提供
+    // Database 插件（com.intellij.database）的模型 API 和 SQL 语言/格式化 API，
+    // 仅编译期使用，运行时由 IDE 提供
     compileOnly(fileTree("F:/IntelliJ IDEA 2026.2.0.1/plugins/DatabaseTools/lib") {
         include("modules/intellij.database.jar", "modules/intellij.database.util.jar")
+    })
+    compileOnly(fileTree("F:/IntelliJ IDEA 2026.2.0.1/plugins/DatabaseTools/lib/modules") {
+        include("intellij.database.sql.jar", "intellij.database.sql.core.impl.jar")
     })
 }
 

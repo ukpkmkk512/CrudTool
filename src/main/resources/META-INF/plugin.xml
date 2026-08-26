@@ -26,7 +26,11 @@
         Add per-project entity generation settings (Lombok annotations) under Settings → Tools → CrudTool<br>
         Fix RejectedExecutionException caused by nested MethodReferencesSearch in reference resolve<br>
         Fix duplicated slashes in copied/searched controller routes when class-level @RequestMapping has a trailing slash<br>
-        Fix PluginException caused by missing displayName attribute on the projectConfigurable descriptor
+        Fix PluginException caused by missing displayName attribute on the projectConfigurable descriptor<br>
+        Fix Format Mapper SQL action never enabled: PSI read in update() now runs under a read action<br>
+        Format Mapper SQL now uses IDEA's built-in SQL formatter engine for exact
+        IDE-style formatting; selection limits formatting to selected statements,
+        caret without selection formats only the enclosing statement
     ]]></change-notes>
 
     <depends>com.intellij.modules.platform</depends>
@@ -89,15 +93,6 @@
                 class="com.crudtool.action.MapperXmlJumpAction"
                 text="Jump to Mapper XML/Java"
                 description="Jump between Mapper interface method and XML statement (Ctrl+Alt+Click)">
-        </action>
-
-        <!-- Ctrl+Alt+F：格式化 MyBatis mapper XML 语句标签内的 SQL -->
-        <action id="com.crudtool.action.FormatMapperSqlAction"
-                class="com.crudtool.action.FormatMapperSqlAction"
-                text="Format Mapper SQL"
-                description="Format SQL inside the current MyBatis statement tag (Ctrl+Alt+F)">
-            <keyboard-shortcut first-keystroke="control alt F" keymap="$default"/>
-            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
         </action>
     </actions>
 
