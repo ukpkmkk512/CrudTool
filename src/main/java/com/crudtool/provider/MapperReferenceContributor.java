@@ -20,13 +20,11 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 /**
- * @Description: 注册 XML resultMap 属性值 → <resultMap> 标签定义处的 PsiReference。
+ * @Description: 注册 XML resultMap 属性值 → &lt;resultMap&gt; 标签定义处的 PsiReference。
  *
- * 注意：Java 方法名 / XML id 属性值 → Java 调用处 的跳转由
- * MapperCallSiteGotoHandler（GotoDeclarationHandler）承担，不在此处用 PsiReference 实现。
- * 原因：reference 的 resolve() 会被平台自身的搜索（CodeVision、重命名、Find Usages 等）触发，
- * 在 resolve 内发起全局 MethodReferencesSearch 会与平台搜索嵌套执行，
- * 耗尽 ForkJoinPool 补偿线程并抛出 RejectedExecutionException。
+ * 注意：Java 方法调用处（userMapper.selectUser(...)）→ mapper XML 的跳转由
+ * MapperXmlJumpAction + MapperJumpEditorListener 通过 Ctrl+Alt+Click 实现，
+ * 不在此处用 PsiReference 实现（避免与 IDEA 内置 Ctrl+Click 跳转冲突）。
  */
 public class MapperReferenceContributor extends PsiReferenceContributor {
 

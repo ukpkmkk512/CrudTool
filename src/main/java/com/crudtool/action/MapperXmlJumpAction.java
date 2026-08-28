@@ -12,7 +12,9 @@ import com.intellij.pom.Navigatable;
 import com.intellij.psi.PsiClass;
 import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiFile;
+import com.intellij.psi.PsiIdentifier;
 import com.intellij.psi.PsiMethod;
+import com.intellij.psi.PsiMethodCallExpression;
 import com.intellij.psi.util.PsiTreeUtil;
 import com.intellij.psi.xml.XmlAttributeValue;
 import com.intellij.psi.xml.XmlFile;
@@ -111,6 +113,24 @@ public class MapperXmlJumpAction extends AnAction {
 
     @NotNull
     private static JumpResult findJavaToXmlTarget(@NotNull PsiElement element, @NotNull Project project) {
+        // 1. 优先：Service 调用处的方法名标识符（userMapper.selectUser 的 selectUser）
+        PsiMethod callMethod = resolveMethodFromCallSite(element);
+        if (callMethod != null) {
+            PsiClass callClass = callMethod.getContainingClass();
+            if (callClass != null && callClass.isInterface()
+                    && MyBatisMapperUtils.isMapperInterface(callClass, project)) {
+                List<XmlFile> xmlFiles = MyBatisMapperUtils.findMapperXmlFiles(callClass, project);
+                for (XmlFile xmlFile : xmlFiles) {
+                    XmlTag statement = MyBatisMapperUtils.findStatementById(xmlFile, callMethod.getName());
+                    if (statement != null) {
+                        return JumpResult.found(statement);
+                    }
+                }
+                return JumpResult.consumed();
+            }
+        }
+
+        // 2. Mapper 接口方法声明处
         PsiMethod method = PsiTreeUtil.getParentOfType(element, PsiMethod.class);
         if (method == null) return JumpResult.notFound();
         PsiClass psiClass = PsiTreeUtil.getParentOfType(method, PsiClass.class);
@@ -135,6 +155,27 @@ public class MapperXmlJumpAction extends AnAction {
         // 没找到 XML 语句：如果方法有 @Select/@Update 等注解 SQL，静默消费事件（已处理，无需 IDEA 弹 No implementations）
         // 如果既没 XML 也没注解，也静默消费事件（不弹错误框，用户可能正在开发中）
         return JumpResult.consumed();
+    }
+
+    /**
+     * 从 Service 调用处解析目标方法：光标在 userMapper.selectUser(...) 的 selectUser 标识符上时，
+     * 通过 PsiMethodCallExpression.resolveMethod() 获取被调用的方法
+     */
+    @Nullable
+    private static PsiMethod resolveMethodFromCallSite(@NotNull PsiElement element) {
+        if (!(element instanceof PsiIdentifier)) {
+            return null;
+        }
+        PsiElement parent = element.getParent();
+        if (!(parent instanceof com.intellij.psi.PsiReferenceExpression)) {
+            return null;
+        }
+        PsiMethodCallExpression call = PsiTreeUtil.getParentOfType(
+                element, PsiMethodCallExpression.class, false);
+        if (call == null) {
+            return null;
+        }
+        return call.resolveMethod();
     }
 
     /**

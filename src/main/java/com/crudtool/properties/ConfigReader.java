@@ -10,10 +10,12 @@ import java.io.InputStream;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
 
 
 /**
- * @Description: 项目初始化阶段配置文件读取与解析
+ * @Description: 项目初始化阶段配置文件读取与解析（按 resources 目录缓存解析结果，
+ * 配置文件修改后通过 modificationStamp 自动失效）
  */
 public class ConfigReader {
 
@@ -25,64 +27,111 @@ public class ConfigReader {
     private static final String YML_BOOTSTRAP_FILE_NAME = "bootstrap.yml";
     private static final String YAML_BOOTSTRAP_FILE_NAME = "bootstrap.yaml";
 
+    private static final String[] CONFIG_FILE_NAMES = {
+            PROPERTIES_FILE_NAME, PROPERTIES_BOOTSTRAP_FILE_NAME,
+            YML_FILE_NAME, YAML_FILE_NAME, YML_BOOTSTRAP_FILE_NAME, YAML_BOOTSTRAP_FILE_NAME
+    };
+
+    /** resources 目录路径 → 缓存的解析结果 */
+    private static final ConcurrentHashMap<String, CachedConfigs> CACHE = new ConcurrentHashMap<>();
+
+    private static final class CachedConfigs {
+        final long stamp;
+        final Properties properties;
+        final Map<String, Object> yml;
+
+        CachedConfigs(long stamp, Properties properties, Map<String, Object> yml) {
+            this.stamp = stamp;
+            this.properties = properties;
+            this.yml = yml;
+        }
+    }
 
     /**
      * 读取 properties（application + bootstrap 合并，后者覆盖前者）
      */
     public static Properties readProperties(PsiDirectory moduleDirectory) {
-        Properties merged = new Properties();
-        Properties p1 = readPropertiesFromFile(moduleDirectory, PROPERTIES_FILE_NAME);
-        if (p1 != null && !p1.isEmpty()) {
-            merged.putAll(p1);
-        }
-        Properties p2 = readPropertiesFromFile(moduleDirectory, PROPERTIES_BOOTSTRAP_FILE_NAME);
-        if (p2 != null && !p2.isEmpty()) {
-            merged.putAll(p2);
-        }
-        return merged;
+        CachedConfigs configs = getConfigs(moduleDirectory);
+        return configs != null ? configs.properties : new Properties();
     }
 
     /**
      * 读取 yml/yaml（application + bootstrap 合并，后者覆盖前者）
      */
     public static Map<String, Object> readYmlOrYaml(PsiDirectory moduleDirectory) {
-        Map<String, Object> merged = new HashMap<>();
-        mergeYml(merged, readYmlFromFile(moduleDirectory, YAML_FILE_NAME));
-        mergeYml(merged, readYmlFromFile(moduleDirectory, YML_FILE_NAME));
-        mergeYml(merged, readYmlFromFile(moduleDirectory, YAML_BOOTSTRAP_FILE_NAME));
-        mergeYml(merged, readYmlFromFile(moduleDirectory, YML_BOOTSTRAP_FILE_NAME));
-        return merged;
+        CachedConfigs configs = getConfigs(moduleDirectory);
+        return configs != null ? configs.yml : new HashMap<>();
     }
 
-    private static void mergeYml(Map<String, Object> merged, Map<String, Object> data) {
-        if (data != null && !data.isEmpty()) {
-            merged.putAll(data);
+    /**
+     * 获取（或计算并缓存）该 resources 目录下的配置解析结果。
+     * stamp 由所有命中的配置文件的 modificationStamp 合成，文件被修改/新增/删除后自动失效。
+     */
+    private static CachedConfigs getConfigs(PsiDirectory moduleDirectory) {
+        if (moduleDirectory == null || moduleDirectory.getVirtualFile() == null) {
+            return null;
         }
+        String key = moduleDirectory.getVirtualFile().getPath();
+
+        // 先定位 6 个配置文件并计算 stamp
+        Map<String, VirtualFile> found = new HashMap<>();
+        long stamp = 0;
+        for (String fileName : CONFIG_FILE_NAMES) {
+            VirtualFile[] files = findFilesByName(moduleDirectory, fileName);
+            if (files.length > 0) {
+                VirtualFile vf = files[0];
+                found.put(fileName, vf);
+                stamp = stamp * 31 + vf.getModificationStamp() + fileName.hashCode();
+            }
+        }
+
+        CachedConfigs cached = CACHE.get(key);
+        if (cached != null && cached.stamp == stamp) {
+            return cached;
+        }
+
+        Properties merged = new Properties();
+        for (String name : new String[]{PROPERTIES_FILE_NAME, PROPERTIES_BOOTSTRAP_FILE_NAME}) {
+            VirtualFile vf = found.get(name);
+            if (vf != null) {
+                Properties p = loadProperties(vf);
+                if (p != null && !p.isEmpty()) {
+                    merged.putAll(p);
+                }
+            }
+        }
+
+        Map<String, Object> ymlMerged = new HashMap<>();
+        for (String name : new String[]{YAML_FILE_NAME, YML_FILE_NAME, YAML_BOOTSTRAP_FILE_NAME, YML_BOOTSTRAP_FILE_NAME}) {
+            VirtualFile vf = found.get(name);
+            if (vf != null) {
+                Map<String, Object> data = loadYml(vf);
+                if (data != null && !data.isEmpty()) {
+                    ymlMerged.putAll(data);
+                }
+            }
+        }
+
+        CachedConfigs result = new CachedConfigs(stamp, merged, ymlMerged);
+        CACHE.put(key, result);
+        return result;
     }
 
-    private static Properties readPropertiesFromFile(PsiDirectory moduleDirectory, String fileName) {
+    private static Properties loadProperties(VirtualFile file) {
         Properties properties = new Properties();
-        VirtualFile[] files = findFilesByName(moduleDirectory, fileName);
-        for (VirtualFile file : files) {
-            try (InputStream inputStream = file.getInputStream()) {
-                properties.load(inputStream);
-                break; // 只加载第一个找到的文件
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+        try (InputStream inputStream = file.getInputStream()) {
+            properties.load(inputStream);
+        } catch (Exception e) {
+            e.printStackTrace();
         }
         return properties;
     }
 
-    private static Map<String, Object> readYmlFromFile(PsiDirectory moduleDirectory, String fileName) {
-        Yaml yaml = new Yaml();
-        VirtualFile[] files = findFilesByName(moduleDirectory, fileName);
-        for (VirtualFile file : files) {
-            try (InputStream inputStream = file.getInputStream()) {
-                return yaml.load(inputStream);
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+    private static Map<String, Object> loadYml(VirtualFile file) {
+        try (InputStream inputStream = file.getInputStream()) {
+            return new Yaml().load(inputStream);
+        } catch (Exception e) {
+            e.printStackTrace();
         }
         return null;
     }

@@ -15,6 +15,7 @@ import com.intellij.openapi.ui.popup.JBPopupFactory;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.PsiFile;
 import com.intellij.psi.PsiMethod;
+import com.intellij.ui.AnimatedIcon;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBList;
 import com.intellij.ui.components.JBScrollPane;
@@ -80,22 +81,23 @@ public class SearchByRouteAction extends AnAction {
         list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         list.setBorder(JBUI.Borders.empty());
 
-        JLabel hintLabel = new JLabel("Loading routes...");
-        hintLabel.setBorder(JBUI.Borders.empty(10));
+        // 底部状态提示：搜索中显示旋转动画图标，完成后显示结果数（非弹窗）
+        JLabel hintLabel = new JLabel("正在搜索路由...", new AnimatedIcon.Default(), SwingConstants.LEFT);
+        hintLabel.setBorder(JBUI.Borders.empty(6, 10));
         hintLabel.setForeground(JBColor.GRAY);
-        hintLabel.setHorizontalAlignment(SwingConstants.CENTER);
 
         final JBPopup[] popupRef = new JBPopup[1];
         final List<RouteItem>[] allRoutesRef = new List[]{new ArrayList<>()};
+        final boolean[] loadingRef = {true};
 
         // 输入实时过滤
         textField.getDocument().addDocumentListener(new DocumentListener() {
             @Override
-            public void insertUpdate(DocumentEvent e) { applyFilter(textField.getText(), allRoutesRef[0], list, hintLabel); }
+            public void insertUpdate(DocumentEvent e) { applyFilter(textField.getText(), allRoutesRef[0], list, hintLabel, loadingRef[0]); }
             @Override
-            public void removeUpdate(DocumentEvent e) { applyFilter(textField.getText(), allRoutesRef[0], list, hintLabel); }
+            public void removeUpdate(DocumentEvent e) { applyFilter(textField.getText(), allRoutesRef[0], list, hintLabel, loadingRef[0]); }
             @Override
-            public void changedUpdate(DocumentEvent e) { applyFilter(textField.getText(), allRoutesRef[0], list, hintLabel); }
+            public void changedUpdate(DocumentEvent e) { applyFilter(textField.getText(), allRoutesRef[0], list, hintLabel, loadingRef[0]); }
         });
 
         // 上下键移动列表选中（在输入框按方向键时）
@@ -179,14 +181,15 @@ public class SearchByRouteAction extends AnAction {
                 .inSmartMode(project)
                 .finishOnUiThread(ModalityState.stateForComponent(panel), routes -> {
                     if (!popup.isVisible()) return;
+                    loadingRef[0] = false;
                     allRoutesRef[0] = routes;
-                    applyFilter(textField.getText(), routes, list, hintLabel);
+                    applyFilter(textField.getText(), routes, list, hintLabel, loadingRef[0]);
                 })
                 .submit(AppExecutorUtil.getAppExecutorService());
     }
 
     private void applyFilter(@NotNull String keyword, @NotNull List<RouteItem> allRoutes,
-                             @NotNull JBList<RouteItem> list, @NotNull JLabel hintLabel) {
+                             @NotNull JBList<RouteItem> list, @NotNull JLabel hintLabel, boolean loading) {
         String key = normalizeSlashes(keyword.trim()).toLowerCase();
         List<RouteItem> filtered = new ArrayList<>();
         for (RouteItem item : allRoutes) {
@@ -201,15 +204,21 @@ public class SearchByRouteAction extends AnAction {
             @Override public int getSize() { return filtered.size(); }
             @Override public RouteItem getElementAt(int index) { return filtered.get(index); }
         });
+        if (loading) {
+            // 搜索中：保持旋转动画提示
+            hintLabel.setIcon(new AnimatedIcon.Default());
+            hintLabel.setText("正在搜索路由...");
+            return;
+        }
+        hintLabel.setIcon(null);
         if (!filtered.isEmpty()) {
             list.setSelectedIndex(0);
-            hintLabel.setText(filtered.size() + " result(s)" +
-                    (filtered.size() >= MAX_DISPLAY_RESULTS ? " (truncated)" : ""));
+            hintLabel.setText(filtered.size() + " 个结果" +
+                    (filtered.size() >= MAX_DISPLAY_RESULTS ? "（已截断）" : ""));
         } else {
-            String hint = key.isEmpty()
-                    ? (allRoutes.isEmpty() ? "Loading routes..." : "No routes found in project")
-                    : "No routes match: " + keyword;
-            hintLabel.setText(hint);
+            hintLabel.setText(key.isEmpty()
+                    ? "项目中未找到路由"
+                    : "没有匹配的路由: " + keyword);
         }
     }
 

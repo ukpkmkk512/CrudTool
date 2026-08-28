@@ -38,6 +38,11 @@ import java.util.List;
  */
 public class FormatMapperSqlAction extends AnAction {
 
+    /** 从文档中读取的原始目标（不涉及 PSI 修改） */
+    private record RawTarget(int start, int end, String innerContent,
+                             int baseIndent, int closeIndent) {
+    }
+
     /** 一次文档替换 */
     private record Replacement(int start, int end, String newText) {
     }
@@ -67,33 +72,54 @@ public class FormatMapperSqlAction extends AnAction {
             return;
         }
 
-        List<Replacement> replacements = ReadAction.compute(() ->
-                collectReplacements(xmlFile, editor));
+        // ReadAction 中只读取原始数据，不做任何 PSI 修改
+        List<RawTarget> rawTargets = ReadAction.compute(() ->
+                collectRawTargets(xmlFile, editor));
 
-        if (replacements.isEmpty()) {
+        if (rawTargets.isEmpty()) {
             notify(project, "No SQL statement to format", NotificationType.INFORMATION);
             return;
         }
 
-        // 从后往前替换，避免偏移量变化
-        replacements.sort(Comparator.comparingInt(Replacement::start).reversed());
-
         Document document = editor.getDocument();
+
+        // WriteCommandAction 中执行：
+        //   1. 创建临时 SQL 文件并 CodeStyleManager.reformat（会修改临时 PSI，需要写锁）
+        //   2. 替换文档中的文本
+        // 从后往前替换，避免偏移量变化
         WriteCommandAction.runWriteCommandAction(project, "Format Mapper SQL", null, () -> {
+            List<Replacement> replacements = new ArrayList<>();
+            for (RawTarget target : rawTargets) {
+                String formatted = MybatisSqlFormatUtils.formatStatement(
+                        project, target.innerContent(), target.baseIndent());
+                if (formatted == null) {
+                    continue;
+                }
+                String newInner = formatted + "\n" + " ".repeat(target.closeIndent());
+                if (!newInner.equals(target.innerContent())) {
+                    replacements.add(new Replacement(
+                            target.start(), target.end(), newInner));
+                }
+            }
+            replacements.sort(Comparator.comparingInt(Replacement::start).reversed());
             for (Replacement rep : replacements) {
                 document.replaceString(rep.start(), rep.end(), rep.newText());
             }
+            if (!replacements.isEmpty()) {
+                notify(project, "Mapper SQL formatted", NotificationType.INFORMATION);
+            } else {
+                notify(project, "No changes needed", NotificationType.INFORMATION);
+            }
         });
-        notify(project, "Mapper SQL formatted", NotificationType.INFORMATION);
     }
 
     /**
-     * 收集需要格式化的语句标签，计算 inner content 的替换范围和新文本。
+     * 在 ReadAction 中收集需要格式化的语句标签的原始数据（纯读取）。
      */
     @NotNull
-    private List<Replacement> collectReplacements(@NotNull XmlFile xmlFile,
-                                                   @NotNull Editor editor) {
-        List<Replacement> result = new ArrayList<>();
+    private List<RawTarget> collectRawTargets(@NotNull XmlFile xmlFile,
+                                               @NotNull Editor editor) {
+        List<RawTarget> result = new ArrayList<>();
         Document document = editor.getDocument();
 
         List<XmlTag> tags = findTargetTags(xmlFile, editor);
@@ -118,18 +144,9 @@ public class FormatMapperSqlAction extends AnAction {
             int innerEnd = tagRange.getStartOffset() + closeStart;
             String innerContent = document.getText(new TextRange(innerStart, innerEnd));
 
-            int baseIndent = lineIndent(document, tag.getTextOffset()) + 4;
-            String formatted = MybatisSqlFormatUtils.formatStatement(
-                    xmlFile.getProject(), innerContent, baseIndent);
-
-            if (formatted != null) {
-                // 闭合标签的缩进 = 语句标签自身的缩进
-                int closeIndent = lineIndent(document, tag.getTextOffset());
-                String newInner = formatted + "\n" + " ".repeat(closeIndent);
-                if (!newInner.equals(innerContent)) {
-                    result.add(new Replacement(innerStart, innerEnd, newInner));
-                }
-            }
+            int tagIndent = lineIndent(document, tag.getTextOffset());
+            result.add(new RawTarget(innerStart, innerEnd, innerContent,
+                    tagIndent + 4, tagIndent));
         }
         return result;
     }

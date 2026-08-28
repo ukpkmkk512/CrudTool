@@ -57,8 +57,10 @@ public class ControllerRouteScanner {
     public static List<RouteItem> scanAllRoutes(@NotNull Project project) {
         return CachedValuesManager.getManager(project).getCachedValue(project, () -> {
             List<RouteItem> routes = computeAllRoutes(project);
-            // 始终返回非空依赖，PSI 变化时自动失效重算；空结果缓存也无害
-            return CachedValueProvider.Result.create(routes, PsiModificationTracker.MODIFICATION_COUNT);
+            // 仅在 Java 结构变化（增删类/方法、改注解）时失效重算；
+            // 编辑方法体等普通修改不触发全量重扫，显著降低 Ctrl+\ 打开后的等待时间
+            return CachedValueProvider.Result.create(routes,
+                    PsiModificationTracker.JAVA_STRUCTURE_MODIFICATION_COUNT);
         });
     }
 
@@ -125,16 +127,23 @@ public class ControllerRouteScanner {
     private static void collectRoutesForClass(@NotNull PsiClass controllerClass,
                                               @NotNull Project project,
                                               @NotNull List<RouteItem> routes) {
+        // 配置前缀按类计算一次（原来每个方法算两次，是主要耗时点之一）
+        String serverPath = ControllerClassScanUtils.extractSpringProperties(
+                controllerClass, project, "server.servlet.context-path");
+        String mvcPath = ControllerClassScanUtils.extractSpringProperties(
+                controllerClass, project, "spring.mvc.servlet.path");
+        String shortName = controllerClass.getName() != null
+                ? controllerClass.getName() : controllerClass.getQualifiedName();
+
         for (PsiMethod method : controllerClass.getMethods()) {
             PsiAnnotation restfulAnnotation = AnnotationParserUtils.findRestfulAnnotation(method);
             if (restfulAnnotation == null) continue;
-            String fullUrl = ControllerClassScanUtils.buildControllerUrl(controllerClass, project, method);
+            String fullUrl = ControllerClassScanUtils.buildControllerUrl(
+                    controllerClass, method, serverPath, mvcPath);
             if (fullUrl == null || fullUrl.isEmpty()) {
                 String classPath = ControllerClassScanUtils.controllerPsiClassPath(controllerClass);
                 fullUrl = (classPath != null && !classPath.isEmpty()) ? classPath : "(default)";
             }
-            String shortName = controllerClass.getName() != null
-                    ? controllerClass.getName() : controllerClass.getQualifiedName();
             routes.add(new RouteItem(fullUrl, shortName, method.getName(), method));
         }
     }

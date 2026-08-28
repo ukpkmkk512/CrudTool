@@ -7,6 +7,7 @@ import com.intellij.psi.PsiFileFactory;
 import com.intellij.psi.codeStyle.CodeStyleManager;
 import com.intellij.sql.SqlFileType;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -84,11 +85,29 @@ public class MybatisSqlFormatUtils {
             return null;
         }
 
-        // 5. 用 IDEA 内置 SQL 格式化引擎格式化完整 SQL（trim 去掉首尾空白，避免累积空行）
+        // 5. 用 IDEA 内置 SQL 格式化引擎格式化完整 SQL（MySQL 方言，trim 避免累积空行）
+        //    指定 MySQL 方言以正确识别 INSERT()、DATE_FORMAT() 等 MySQL 函数，
+        //    避免函数名被误判为 SQL 关键字。用反射获取，避免编译期传递依赖。
         String formatted;
         try {
-            PsiFile sqlFile = PsiFileFactory.getInstance(project)
-                    .createFileFromText("temp_mapper.sql", SqlFileType.INSTANCE, working.trim());
+            String sqlText = working.trim();
+            PsiFileFactory factory = PsiFileFactory.getInstance(project);
+            PsiFile sqlFile = null;
+            try {
+                Class<?> mysqlDialect = Class.forName("com.intellij.sql.dialects.mysql.MysqlDialect");
+                Field instanceField = mysqlDialect.getField("INSTANCE");
+                Object language = instanceField.get(null);
+                // createFileFromText(String, Language, CharSequence)
+                sqlFile = factory.createFileFromText("temp_mapper.sql",
+                        (com.intellij.lang.Language) language, sqlText);
+            } catch (ClassNotFoundException | NoSuchFieldException
+                     | IllegalAccessException | ClassCastException ignored) {
+                // MySQL 方言不可用时回退到通用 SQL
+            }
+            if (sqlFile == null) {
+                sqlFile = factory.createFileFromText("temp_mapper.sql",
+                        SqlFileType.INSTANCE, sqlText);
+            }
             CodeStyleManager.getInstance(project).reformat(sqlFile);
             formatted = sqlFile.getText();
         } catch (Exception e) {

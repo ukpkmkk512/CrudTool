@@ -40,6 +40,15 @@ public class ControllerClassScanUtils {
     public static String buildControllerUrl(PsiClass psiClass, Project project, PsiMethod method) {
         String serverPath = extractSpringProperties(psiClass, project, SPRINGBOOT_SERVER_PATH);
         String mvcPath = extractSpringProperties(psiClass, project, SPRINGMVC_PATH);
+        return buildControllerUrl(psiClass, method, serverPath, mvcPath);
+    }
+
+    /**
+     * 使用预先计算好的配置前缀拼接 URL，避免同一类的每个方法重复解析配置文件
+     */
+    @NotNull
+    public static String buildControllerUrl(PsiClass psiClass, PsiMethod method,
+                                            String serverPath, String mvcPath) {
         String classPath = controllerPsiClassPath(psiClass);
         String methodPath = controllerMethodPath(method);
         return normalizePath(serverPath + mvcPath + classPath + methodPath);
