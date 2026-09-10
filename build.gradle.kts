@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.crudtool"
-version = "0.40"
+version = "0.51"
 
 repositories {
     mavenCentral()

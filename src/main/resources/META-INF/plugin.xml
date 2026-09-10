@@ -43,6 +43,9 @@
         <!-- 实体类生成设置（按项目隔离） -->
         <projectService serviceImplementation="com.crudtool.settings.EntityGeneratorSettings"/>
 
+        <!-- Eolink 上传设置（按项目隔离） -->
+        <projectService serviceImplementation="com.crudtool.settings.EolinkSettings"/>
+
         <!-- Settings → Tools → CrudTool -->
         <projectConfigurable id="com.crudtool.settings.EntityGeneratorConfigurable"
                              instance="com.crudtool.settings.EntityGeneratorConfigurable"
@@ -93,6 +96,14 @@
                 class="com.crudtool.action.MapperXmlJumpAction"
                 text="Jump to Mapper XML/Java"
                 description="Jump between Mapper interface method and XML statement (Ctrl+Alt+Click)">
+        </action>
+
+        <!-- 编辑器右键：上传当前 Controller 接口到 Eolink -->
+        <action id="com.crudtool.action.UploadToEolinkAction"
+                class="com.crudtool.action.UploadToEolinkAction"
+                text="Upload to Eolink"
+                description="Upload the current Controller API (url, method, request params, response) to Eolink">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
         </action>
     </actions>
 
